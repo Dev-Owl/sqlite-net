@@ -711,24 +711,38 @@ namespace SQLite
 			return cmd.ExecuteQuery<T> ();
 		}
 
-		/// <summary>
-		/// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
-		/// in the command text for each of the arguments and then executes that command.
-		/// It returns each row of the result using the mapping automatically generated for
-		/// the given type.
-		/// </summary>
-		/// <param name="query">
-		/// The fully escaped SQL.
-		/// </param>
-		/// <param name="args">
-		/// Arguments to substitute for the occurences of '?' in the query.
-		/// </param>
-		/// <returns>
-		/// An enumerable with one result for each row returned by the query.
-		/// The enumerator will call sqlite3_step on each call to MoveNext, so the database
-		/// connection must remain open for the lifetime of the enumerator.
-		/// </returns>
-		public IEnumerable<T> DeferredQuery<T>(string query, params object[] args) where T : new()
+        //Added by chrisitan muehle on 19.10.16
+        public object Query(string query, Type RequestType, params object[] args)
+        {
+            var cmd = CreateCommand(query, args);
+            return cmd.ExcuteQuery(RequestType);
+        }
+
+        //Added by chrisitan muehle on 19.10.16
+        public List<object> QueryList(string query, Type RequestType, params object[] args)
+        {
+            var cmd = CreateCommand(query, args);
+            return cmd.ExcuteQueryList(RequestType);
+        }
+
+        /// <summary>
+        /// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
+        /// in the command text for each of the arguments and then executes that command.
+        /// It returns each row of the result using the mapping automatically generated for
+        /// the given type.
+        /// </summary>
+        /// <param name="query">
+        /// The fully escaped SQL.
+        /// </param>
+        /// <param name="args">
+        /// Arguments to substitute for the occurences of '?' in the query.
+        /// </param>
+        /// <returns>
+        /// An enumerable with one result for each row returned by the query.
+        /// The enumerator will call sqlite3_step on each call to MoveNext, so the database
+        /// connection must remain open for the lifetime of the enumerator.
+        /// </returns>
+        public IEnumerable<T> DeferredQuery<T>(string query, params object[] args) where T : new()
 		{
 			var cmd = CreateCommand(query, args);
 			return cmd.ExecuteDeferredQuery<T>();
@@ -1768,6 +1782,33 @@ namespace SQLite
     {
     }
 
+    [AttributeUsage(AttributeTargets.Property)]
+    public class DefaultAttrribute : Attribute
+    {
+        /// <summary>
+        /// SQL default string for the given column
+        /// </summary>
+        public string Default { get; set; }
+
+        public DefaultAttrribute(string DefaultValue)
+        {
+            Default = DefaultValue;
+        }
+    }
+
+
+    /// <summary>
+    /// Can be used to allow the usage of a property as a virtual column, overrides ignores on selects
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class VirtualColumn : IgnoreAttribute
+    {
+        public VirtualColumn()
+        {
+
+        }
+    }
+
     public class TableMapping
 	{
 		public Type MappedType { get; private set; }
@@ -1776,7 +1817,10 @@ namespace SQLite
 
 		public Column[] Columns { get; private set; }
 
-		public Column PK { get; private set; }
+        //Added by Christian Muehle on 19.10.16
+        public Column[] VirtualColumns { get; private set; }
+
+        public Column PK { get; private set; }
 
 		public string GetByPrimaryKeySql { get; private set; }
 
@@ -1805,18 +1849,26 @@ namespace SQLite
 						select p;
 #endif
 			var cols = new List<Column> ();
-			foreach (var p in props) {
+            var vCols = new List<Column>();// added by Christian  Muehle on 19.10.2016
+            foreach (var p in props) {
 #if !USE_NEW_REFLECTION_API
 				var ignore = p.GetCustomAttributes (typeof(IgnoreAttribute), true).Length > 0;
+                var virtualColumn = p.GetCustomAttributes(typeof(VirtualColumn), true).Length > 0;// added by Christian  Muehle on 19.10.2016
 #else
-				var ignore = p.GetCustomAttributes (typeof(IgnoreAttribute), true).Count() > 0;
+                var ignore = p.GetCustomAttributes(typeof(IgnoreAttribute), true).Count() > 0;
+                var virtualColumn = p.GetCustomAttributes(typeof(VirtualColumn), true).Count() > 0; // added by Christian  Muehle on 19.10.2016
 #endif
-				if (p.CanWrite && !ignore) {
+                if (p.CanWrite && !ignore) {
 					cols.Add (new Column (p, createFlags));
 				}
-			}
+                else if (virtualColumn)// added by Christian  Muehle on 19.10.2016
+                {
+                    vCols.Add(new Column(p, createFlags));
+                }
+            }
 			Columns = cols.ToArray ();
-			foreach (var c in Columns) {
+            VirtualColumns = vCols.ToArray(); // added by Christian  Muehle on 19.10.2016
+            foreach (var c in Columns) {
 				if (c.IsAutoInc && c.IsPK) {
 					_autoPk = c;
 				}
@@ -1873,7 +1925,10 @@ namespace SQLite
 		public Column FindColumn (string columnName)
 		{
 			var exact = Columns.FirstOrDefault (c => c.Name == columnName);
-			return exact;
+            //added by christian muehle on 19.10.2016
+            if (exact == null)
+                exact = VirtualColumns.FirstOrDefault(c => c.Name == columnName);
+            return exact;
 		}
 
         ConcurrentStringDictionary _insertCommandMap;
@@ -1956,6 +2011,10 @@ namespace SQLite
 
             public bool StoreAsText { get; private set; }
 
+            //Added on 19.10.2016 by Christian Muehle
+            public string DefaultValue { get; private set; }
+
+
             public Column(PropertyInfo prop, CreateFlags createFlags = CreateFlags.None)
             {
                 var colAttr = (ColumnAttribute)prop.GetCustomAttributes(typeof(ColumnAttribute), true).FirstOrDefault();
@@ -1987,6 +2046,8 @@ namespace SQLite
                 MaxStringLength = Orm.MaxStringLength(prop);
 
                 StoreAsText = prop.PropertyType.GetTypeInfo().GetCustomAttribute(typeof(StoreAsTextAttribute), false) != null;
+                //Added on 19.10 by Christian Muehle
+                DefaultValue = Orm.ColumnDefault(prop);
             }
 
 			public void SetValue (object obj, object val)
@@ -2009,9 +2070,9 @@ namespace SQLite
 
 		public static string SqlDecl (TableMapping.Column p, bool storeDateTimeAsTicks)
 		{
-			string decl = "\"" + p.Name + "\" " + SqlType (p, storeDateTimeAsTicks) + " ";
-			
-			if (p.IsPK) {
+			string decl = $"\"{p.Name}\" {SqlType (p, storeDateTimeAsTicks)} ";// change string concatenation to string.format
+
+            if (p.IsPK) {
 				decl += "primary key ";
 			}
 			if (p.IsAutoInc) {
@@ -2021,10 +2082,14 @@ namespace SQLite
 				decl += "not null ";
 			}
 			if (!string.IsNullOrEmpty (p.Collation)) {
-				decl += "collate " + p.Collation + " ";
-			}
-			
-			return decl;
+                decl += $"collate {p.Collation} "; // change string concatenation to string.format
+            }
+            //Added by Christian Muehle on 19.10.2016
+            if (!string.IsNullOrEmpty(p.DefaultValue))
+            {
+                decl += string.Format("DEFAULT {0} ", p.DefaultValue);
+            }
+            return decl;
 		}
 
 		public static string SqlType (TableMapping.Column p, bool storeDateTimeAsTicks)
@@ -2130,9 +2195,19 @@ namespace SQLite
 	return attrs.Count() > 0;
 #endif
 		}
-	}
 
-	public partial class SQLiteCommand
+        //19.10.2016 added by Christian Muehle
+        public static string ColumnDefault(MemberInfo p)
+        {
+            var attrs = p.GetCustomAttributes(typeof(DefaultAttrribute), true);
+            if (attrs.Count() > 0)
+                return ((DefaultAttrribute)attrs.First()).Default;
+            return null;
+        }
+
+    }
+
+    public partial class SQLiteCommand
 	{
 		SQLiteConnection _conn;
 		private List<Binding> _bindings;
@@ -2176,13 +2251,25 @@ namespace SQLite
 		{
 			return ExecuteDeferredQuery<T>(_conn.GetMapping(typeof(T)));
 		}
+        
+        //Added by Christian Muehle on 19.10.16
+        public object ExcuteQuery(Type RequestType)
+        {
+            return ExecuteDeferredQuery(_conn.GetMapping(RequestType));
+        }
 
-		public List<T> ExecuteQuery<T> ()
+        public List<T> ExecuteQuery<T> ()
 		{
 			return ExecuteDeferredQuery<T>(_conn.GetMapping(typeof(T))).ToList();
 		}
 
-		public List<T> ExecuteQuery<T> (TableMapping map)
+        //Added by Christian Muehle on 19.10.16
+        public List<object> ExcuteQueryList(Type RequestType)
+        {
+            return ExecuteDeferredQueryList(_conn.GetMapping(RequestType)).ToList<object>();
+        }
+
+        public List<T> ExecuteQuery<T> (TableMapping map)
 		{
 			return ExecuteDeferredQuery<T>(map).ToList();
 		}
@@ -2239,7 +2326,89 @@ namespace SQLite
 			}
 		}
 
-		public T ExecuteScalar<T> ()
+        //Added by Christian Muehle on 19.10.2016
+        public object ExecuteDeferredQuery(TableMapping map)
+        {
+            object result = null;
+            if (_conn.Trace)
+            {
+                Debug.WriteLine("Executing Query: " + this);
+            }
+
+            var stmt = Prepare();
+            try
+            {
+                var cols = new TableMapping.Column[SQLite3.ColumnCount(stmt)];
+
+                for (int i = 0; i < cols.Length; i++)
+                {
+                    var name = SQLite3.ColumnName16(stmt, i);
+                    cols[i] = map.FindColumn(name);
+                }
+
+                if (SQLite3.Step(stmt) == SQLite3.Result.Row)
+                {
+                    var obj = Activator.CreateInstance(map.MappedType);
+                    for (int i = 0; i < cols.Length; i++)
+                    {
+                        if (cols[i] == null)
+                            continue;
+                        var colType = SQLite3.ColumnType(stmt, i);
+                        var val = ReadCol(stmt, i, colType, cols[i].ColumnType);
+                        cols[i].SetValue(obj, val);
+                    }
+                    OnInstanceCreated(obj);
+                    result = obj;
+                }
+            }
+            finally
+            {
+                SQLite3.Finalize(stmt);
+            }
+            return result;
+        }
+
+        //Added by Christian Muehle on 19.10.2016
+        public IEnumerable<object> ExecuteDeferredQueryList(TableMapping map)
+        {
+            if (_conn.Trace)
+            {
+                Debug.WriteLine("Executing Query: " + this);
+            }
+
+            var stmt = Prepare();
+            try
+            {
+                var cols = new TableMapping.Column[SQLite3.ColumnCount(stmt)];
+
+                for (int i = 0; i < cols.Length; i++)
+                {
+                    var name = SQLite3.ColumnName16(stmt, i);
+                    cols[i] = map.FindColumn(name);
+                }
+
+                while (SQLite3.Step(stmt) == SQLite3.Result.Row)
+                {
+                    var obj = Activator.CreateInstance(map.MappedType);
+                    for (int i = 0; i < cols.Length; i++)
+                    {
+                        if (cols[i] == null)
+                            continue;
+                        var colType = SQLite3.ColumnType(stmt, i);
+                        var val = ReadCol(stmt, i, colType, cols[i].ColumnType);
+                        cols[i].SetValue(obj, val);
+                    }
+                    OnInstanceCreated(obj);
+                    yield return obj;
+                }
+            }
+            finally
+            {
+                SQLite3.Finalize(stmt);
+            }
+        }
+
+        public T ExecuteScalar<T> ()
 		{
 			if (_conn.Trace) {
 				Debug.WriteLine ("Executing Query: " + this);
@@ -2271,7 +2440,44 @@ namespace SQLite
 			return val;
 		}
 
-		public void Bind (string name, object val)
+        /// <summary>
+        /// Added by Christian on 19.10.16 
+        /// </summary>
+        /// <param name="ResolveType">Type that should be returned</param>
+        /// <returns></returns>
+        public object ExecuteScalar(Type ResolveType)
+        {
+            if (_conn.Trace)
+            {
+                Debug.WriteLine("Executing Query:" + this);
+            }
+            object result = null;
+            var stmt = Prepare();
+            try
+            {
+                var r = SQLite3.Step(stmt);
+                if (r == SQLite3.Result.Row)
+                {
+                    var colType = SQLite3.ColumnType(stmt, 0);
+                    result = ReadCol(stmt, 0, colType,ResolveType);
+                }
+                else if (r == SQLite3.Result.Done)
+                {
+                }
+                else
+                {
+                    throw SQLiteException.New(r, SQLite3.GetErrmsg(_conn.Handle));
+                }
+            }
+            finally
+            {
+                Finalize(stmt);
+            }
+
+            return result;
+        }
+
+        public void Bind (string name, object val)
 		{
 			_bindings.Add (new Binding {
 				Name = name,

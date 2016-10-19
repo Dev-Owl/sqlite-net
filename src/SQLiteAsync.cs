@@ -166,6 +166,20 @@ namespace SQLite
 			});
 		}
 
+        //Added by Christian Muehle on 19.10.16
+        public Task<int> DeleteAsync<T>(object pk)
+             where T :new()
+        {
+            return Task.Factory.StartNew(() => {
+                var conn = GetConnection();
+                using (conn.Lock())
+                {
+                    return conn.Delete<T>(pk);
+                }
+            });
+        }
+
+
         public Task<T> GetAsync<T>(object pk)
             where T : new()
         {
@@ -307,7 +321,21 @@ namespace SQLite
 			});
 		}
 
-		public Task<List<T>> QueryAsync<T> (string sql, params object[] args)
+        //Added by Christian Muehle on 19.10.2016
+        public Task<object> ExecuteScalarAsync(string sql, Type ResolveType, params object[] args)
+        {
+            return Task<object>.Factory.StartNew(() => {
+                var conn = GetConnection();
+                using (conn.Lock())
+                {
+                    var command = conn.CreateCommand(sql, args);
+                    return command.ExecuteScalar(ResolveType);
+                }
+            });
+        }
+
+
+        public Task<List<T>> QueryAsync<T> (string sql, params object[] args)
 			where T : new ()
 		{
 			return Task<List<T>>.Factory.StartNew (() => {
@@ -317,7 +345,30 @@ namespace SQLite
 				}
 			});
 		}
-	}
+
+        //Added by Christian Muehle on 19.06.2016
+        public Task<List<object>> QuerAsyncList(string sql, Type ResolveType, params object[] args)
+        {
+            return Task<List<object>>.Factory.StartNew(() => {
+                var conn = GetConnection();
+                using (conn.Lock())
+                {
+                    return conn.QueryList(sql, ResolveType, args);
+                }
+            });
+        }
+
+        public Task<object> QuerAsync(string sql, Type ResolveType, params object[] args)
+        {
+            return Task<object>.Factory.StartNew(() => {
+                var conn = GetConnection();
+                using (conn.Lock())
+                {
+                    return conn.Query(sql, ResolveType, args);
+                }
+            });
+        }
+    }
 
 	//
 	// TODO: Bind to AsyncConnection.GetConnection instead so that delayed
